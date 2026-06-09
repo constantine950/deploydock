@@ -1,0 +1,21 @@
+# Environment
+.env
+.env.local
+
+# Go
+bin/
+tmp/
+*.exe
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Docker volumes
+postgres_data/
+redis_data/
+
+# OS
+.DS_Store
+Thumbs.db

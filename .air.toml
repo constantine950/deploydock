@@ -1,0 +1,19 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/server ./cmd/server"
+  bin = "./tmp/server"
+  delay = 1000
+  exclude_dir = ["frontend", "tmp", "docs", "scripts"]
+  include_ext = ["go"]
+  kill_delay = "0s"
+  log = "build-errors.log"
+
+[log]
+  time = true
+
+[color]
+  build = "yellow"
+  runner = "green"
+  watcher = "cyan"

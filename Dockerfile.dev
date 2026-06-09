@@ -1,0 +1,18 @@
+FROM golang:1.23-alpine
+
+# Install air for hot reload in development
+RUN go install github.com/air-verse/air@v1.52.3
+
+WORKDIR /app
+
+# Copy go mod files first for better layer caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source (volume mount will override this at runtime)
+COPY . .
+
+EXPOSE 8080
+
+# air watches for file changes and auto-restarts the server
+CMD ["air", "-c", ".air.toml"]
