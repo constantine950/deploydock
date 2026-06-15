@@ -1,51 +1,88 @@
 package main
 
 import (
+	"database/sql"
+	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/gofiber/fiber/v2/middleware/logger"
-	"github.com/gofiber/fiber/v2/middleware/recover"
-
-	"github.com/constantine950/deploydock/config"
+	_ "github.com/lib/pq"
 )
 
 func main() {
-	cfg := config.Load()
-
-	app := fiber.New(fiber.Config{
-		AppName: "DeployDock v1",
-	})
-
-	// Middleware
-	app.Use(recover.New())
-	app.Use(logger.New())
-	app.Use(cors.New(cors.Config{
-		AllowOrigins: "*",
-		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
-	}))
-
-	// Health check
-	app.Get("/health", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"status": "ok", "env": cfg.AppEnv})
-	})
-
-	// Routes will be registered here as we build each module
-	// Day 4: app.Post("/webhooks/git", webhook.Handler)
-	// Day 8: deploy routes
-	// Day 12: env var routes
-	// Day 13: log streaming WebSocket
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://deploydock:deploydock_secret@localhost:5432/deploydock?sslmode=disable"
 	}
 
-	log.Printf("DeployDock server starting on :%s (env: %s)", port, cfg.AppEnv)
-
-	if err := app.Listen(":" + port); err != nil {
-		log.Fatalf("server failed to start: %v", err)
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("failed to connect to database: %v", err)
 	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		log.Fatalf("failed to ping database: %v", err)
+	}
+
+	// Create migrations tracking table
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			filename   VARCHAR(255) PRIMARY KEY,
+			applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		)
+	`)
+	if err != nil {
+		log.Fatalf("failed to create migrations table: %v", err)
+	}
+
+	// Read migration files
+	files, err := filepath.Glob("migrations/*.sql")
+	if err != nil {
+		log.Fatalf("failed to read migrations: %v", err)
+	}
+	sort.Strings(files)
+
+	for _, file := range files {
+		filename := filepath.Base(file)
+
+		// Skip if already applied
+		var count int
+		err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE filename = $1", filename).Scan(&count)
+		if err != nil {
+			log.Fatalf("failed to check migration %s: %v", filename, err)
+		}
+		if count > 0 {
+			fmt.Printf("  skip  %s (already applied)\n", filename)
+			continue
+		}
+
+		// Read and execute
+		content, err := os.ReadFile(file)
+		if err != nil {
+			log.Fatalf("failed to read %s: %v", filename, err)
+		}
+
+		// Skip seed files
+		if strings.Contains(filename, "seed") {
+			continue
+		}
+
+		_, err = db.Exec(string(content))
+		if err != nil {
+			log.Fatalf("failed to apply %s: %v\n%s", filename, err, content)
+		}
+
+		_, err = db.Exec("INSERT INTO schema_migrations (filename) VALUES ($1)", filename)
+		if err != nil {
+			log.Fatalf("failed to record migration %s: %v", filename, err)
+		}
+
+		fmt.Printf("  apply  %s\n", filename)
+	}
+
+	fmt.Println("Migrations complete.")
 }
