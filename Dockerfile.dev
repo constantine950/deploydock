@@ -1,6 +1,7 @@
 FROM golang:1.23-alpine
 
-# Install air for hot reload in development
+# Install air for hot reload, git for cloning repos in the build worker
+RUN apk add --no-cache git
 RUN go install github.com/air-verse/air@v1.52.3
 
 WORKDIR /app

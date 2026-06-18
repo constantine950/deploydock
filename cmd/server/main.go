@@ -15,6 +15,7 @@ import (
 
 	"github.com/constantine950/deploydock/config"
 	"github.com/constantine950/deploydock/internal/webhook"
+	"github.com/constantine950/deploydock/internal/worker"
 )
 
 func main() {
@@ -63,6 +64,10 @@ func main() {
 	// Webhook routes — Day 4
 	webhookHandler := webhook.NewHandler(db, rdb)
 	app.Post("/webhooks/git", webhookHandler.HandlePush)
+
+	// Build worker — Day 5 (clone + detect runtime), Day 6 (full build engine)
+	pool := worker.NewPool(db, rdb)
+	go pool.Start(context.Background())
 
 	// Day 8: deploy routes
 	// Day 12: env var routes
