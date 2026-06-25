@@ -14,8 +14,6 @@ import (
 	"github.com/constantine950/deploydock/internal/build"
 )
 
-// BuildJob mirrors webhook.BuildJob — duplicated here to avoid an import
-// cycle between webhook and worker packages.
 type BuildJob struct {
 	DeploymentID string `json:"deployment_id"`
 	AppID        string `json:"app_id"`
@@ -33,8 +31,6 @@ func NewPool(db *sql.DB, rdb *redis.Client) *Pool {
 	return &Pool{db: db, rdb: rdb}
 }
 
-// Start runs the build worker loop in the current goroutine.
-// Call with `go pool.Start(ctx)` from main.
 func (p *Pool) Start(ctx context.Context) {
 	log.Println("build worker: started, watching build:queue")
 
@@ -46,17 +42,15 @@ func (p *Pool) Start(ctx context.Context) {
 		default:
 		}
 
-		// BRPop blocks for up to 5s waiting for a job
 		result, err := p.rdb.BRPop(ctx, 5_000_000_000, "build:queue").Result()
 		if err == redis.Nil {
-			continue // no job, loop again
+			continue
 		}
 		if err != nil {
 			log.Printf("build worker: redis error: %v", err)
 			continue
 		}
 
-		// result[0] is the key name, result[1] is the value
 		var job BuildJob
 		if err := json.Unmarshal([]byte(result[1]), &job); err != nil {
 			log.Printf("build worker: failed to parse job: %v", err)
@@ -71,14 +65,13 @@ func (p *Pool) processJob(job BuildJob) {
 	logger := build.NewLogger(p.db, job.DeploymentID)
 	logger.Stdout("starting build for deployment " + job.DeploymentID)
 
-	// Update status to building
-	_, err := p.db.Exec(`UPDATE deployments SET status = 'building' WHERE id = $1`, job.DeploymentID)
+	_, err := p.db.Exec("UPDATE deployments SET status = 'building' WHERE id = $1", job.DeploymentID)
 	if err != nil {
 		logger.Stderr("failed to update deployment status: " + err.Error())
 		return
 	}
 
-	// 1. Clone repo to temp directory
+	// 1. Clone repo
 	tmpDir, err := os.MkdirTemp("", "deploydock-build-*")
 	if err != nil {
 		p.failDeployment(job, logger, "failed to create temp dir: "+err.Error())
@@ -87,7 +80,6 @@ func (p *Pool) processJob(job BuildJob) {
 	defer os.RemoveAll(tmpDir)
 
 	logger.Stdout("cloning " + job.RepoURL + " (branch " + job.Branch + ") into " + filepath.Base(tmpDir))
-
 	cmd := exec.Command("git", "clone", "--depth", "1", "--branch", job.Branch, job.RepoURL, tmpDir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -96,44 +88,37 @@ func (p *Pool) processJob(job BuildJob) {
 	}
 	logger.Stdout("clone complete")
 
-	// 2. Detect runtime
-	runtime, err := build.DetectRuntime(tmpDir)
+	// 2. Build image
+	engine := build.NewEngine(p.db)
+	result, err := engine.Build(context.Background(), tmpDir, job.AppID, job.DeploymentID, logger)
 	if err != nil {
-		p.failDeployment(job, logger, "runtime detection failed: "+err.Error())
+		p.failDeployment(job, logger, "build failed: "+err.Error())
 		return
 	}
-	logger.Stdout("detected runtime: " + string(runtime))
 
-	// 3. Select Dockerfile template (validated here; written to disk in Day 6's build engine)
-	if _, err := build.DockerfileTemplate(runtime); err != nil {
-		p.failDeployment(job, logger, "template selection failed: "+err.Error())
-		return
-	}
-	logger.Stdout("selected Dockerfile template for " + string(runtime))
-
-	// 4. Record detected runtime on the app
-	_, err = p.db.Exec(`UPDATE apps SET runtime = $1, status = 'idle' WHERE id = $2`, string(runtime), job.AppID)
+	// 3. Update app runtime and status
+	_, err = p.db.Exec(
+		"UPDATE apps SET runtime = $1, status = 'idle', updated_at = NOW() WHERE id = $2",
+		string(result.Runtime), job.AppID,
+	)
 	if err != nil {
-		logger.Stderr("failed to record runtime on app: " + err.Error())
+		logger.Stderr("failed to update app: " + err.Error())
 	}
 
-	logger.Stdout("Day 5 complete — runtime detection done. Build engine (Day 6) picks up from here.")
+	// 4. Mark deployment as deploying (Day 8 deploy engine takes over)
+	_, err = p.db.Exec("UPDATE deployments SET status = 'deploying' WHERE id = $1", job.DeploymentID)
+	if err != nil {
+		logger.Stderr("failed to update deployment status: " + err.Error())
+	}
+
+	logger.Stdout("build complete — image ready for deploy engine (Day 8)")
 }
 
 func (p *Pool) failDeployment(job BuildJob, logger *build.Logger, errMsg string) {
 	logger.Stderr(errMsg)
-
-	_, err := p.db.Exec(`
-		UPDATE deployments SET status = 'failed', error_message = $1, finished_at = NOW()
-		WHERE id = $2
-	`, errMsg, job.DeploymentID)
-	if err != nil {
-		log.Printf("build worker: failed to mark deployment failed: %v", err)
-	}
-
-	// Reset app status so the next push isn't blocked by a stuck "building" state
-	_, err = p.db.Exec(`UPDATE apps SET status = 'idle' WHERE id = $1`, job.AppID)
-	if err != nil {
-		log.Printf("build worker: failed to reset app status: %v", err)
-	}
+	p.db.Exec(
+		"UPDATE deployments SET status = 'failed', error_message = $1, finished_at = NOW() WHERE id = $2",
+		errMsg, job.DeploymentID,
+	)
+	p.db.Exec("UPDATE apps SET status = 'idle' WHERE id = $1", job.AppID)
 }
