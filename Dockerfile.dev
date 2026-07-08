@@ -1,7 +1,7 @@
 FROM golang:1.23-alpine
 
 # Install air for hot reload, git for cloning repos, tar for build context
-RUN apk add --no-cache git tar
+RUN apk add --no-cache git tar docker-cli
 RUN go install github.com/air-verse/air@v1.52.3
 
 WORKDIR /app
