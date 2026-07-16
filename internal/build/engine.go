@@ -52,11 +52,11 @@ func (e *Engine) Build(ctx context.Context, repoPath, appID, deploymentID string
 
 	// 4. Shell out to docker build — streams output in real time
 	cmd := exec.CommandContext(ctx, "docker", "build",
-		"-f", dockerfilePath,
-		"-t", imageTag,
-		"--progress=plain",
-		repoPath,
+    "-f", dockerfilePath,
+    "-t", imageTag,
+    repoPath,
 	)
+	cmd.Env = append(cmd.Environ(), "DOCKER_BUILDKIT=0")
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
