@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/constantine950/deploydock/internal/build"
+	"github.com/constantine950/deploydock/internal/deploy"
 )
 
 type BuildJob struct {
@@ -90,28 +92,59 @@ func (p *Pool) processJob(job BuildJob) {
 
 	// 2. Build image
 	engine := build.NewEngine(p.db)
-	result, err := engine.Build(context.Background(), tmpDir, job.AppID, job.DeploymentID, logger)
+	buildResult, err := engine.Build(context.Background(), tmpDir, job.AppID, job.DeploymentID, logger)
 	if err != nil {
 		p.failDeployment(job, logger, "build failed: "+err.Error())
 		return
 	}
 
-	// 3. Update app runtime and status
+	// 3. Update app runtime
 	_, err = p.db.Exec(
-		"UPDATE apps SET runtime = $1, status = 'idle', updated_at = NOW() WHERE id = $2",
-		string(result.Runtime), job.AppID,
+		"UPDATE apps SET runtime = $1, updated_at = NOW() WHERE id = $2",
+		string(buildResult.Runtime), job.AppID,
 	)
 	if err != nil {
-		logger.Stderr("failed to update app: " + err.Error())
+		logger.Stderr("failed to update app runtime: " + err.Error())
 	}
 
-	// 4. Mark deployment as deploying (Day 8 deploy engine takes over)
+	// 4. Deploy container
+	logger.Stdout("starting deploy engine...")
 	_, err = p.db.Exec("UPDATE deployments SET status = 'deploying' WHERE id = $1", job.DeploymentID)
 	if err != nil {
 		logger.Stderr("failed to update deployment status: " + err.Error())
 	}
 
-	logger.Stdout("build complete — image ready for deploy engine (Day 8)")
+	deployEngine := deploy.NewEngine(p.db)
+	deployResult, err := deployEngine.Deploy(
+		context.Background(),
+		buildResult.ImageTag,
+		job.AppID,
+		job.DeploymentID,
+	)
+	if err != nil {
+		p.failDeployment(job, logger, "deploy failed: "+err.Error())
+		return
+	}
+
+	// 5. Mark deployment live
+	_, err = p.db.Exec(
+		"UPDATE deployments SET status = 'live', finished_at = NOW() WHERE id = $1",
+		job.DeploymentID,
+	)
+	if err != nil {
+		logger.Stderr("failed to mark deployment live: " + err.Error())
+	}
+
+	// 6. Mark app live
+	_, err = p.db.Exec("UPDATE apps SET status = 'live', updated_at = NOW() WHERE id = $1", job.AppID)
+	if err != nil {
+		logger.Stderr("failed to mark app live: " + err.Error())
+	}
+
+	logger.Stdout(
+		"deployment live — container " + deployResult.ContainerID +
+			" running on port " + fmt.Sprint(deployResult.Port),
+	)
 }
 
 func (p *Pool) failDeployment(job BuildJob, logger *build.Logger, errMsg string) {
