@@ -14,6 +14,7 @@ import (
 
 	"github.com/constantine950/deploydock/internal/build"
 	"github.com/constantine950/deploydock/internal/deploy"
+	"github.com/constantine950/deploydock/internal/router"
 )
 
 type BuildJob struct {
@@ -25,12 +26,17 @@ type BuildJob struct {
 }
 
 type Pool struct {
-	db  *sql.DB
-	rdb *redis.Client
+	db    *sql.DB
+	rdb   *redis.Client
+	nginx *router.Manager
 }
 
 func NewPool(db *sql.DB, rdb *redis.Client) *Pool {
-	return &Pool{db: db, rdb: rdb}
+	return &Pool{
+		db:    db,
+		rdb:   rdb,
+		nginx: router.NewManager(db),
+	}
 }
 
 func (p *Pool) Start(ctx context.Context) {
@@ -67,13 +73,9 @@ func (p *Pool) processJob(job BuildJob) {
 	logger := build.NewLogger(p.db, job.DeploymentID)
 	logger.Stdout("starting build for deployment " + job.DeploymentID)
 
-	_, err := p.db.Exec("UPDATE deployments SET status = 'building' WHERE id = $1", job.DeploymentID)
-	if err != nil {
-		logger.Stderr("failed to update deployment status: " + err.Error())
-		return
-	}
+	p.db.Exec("UPDATE deployments SET status = 'building' WHERE id = $1", job.DeploymentID)
 
-	// 1. Clone repo
+	// 1. Clone
 	tmpDir, err := os.MkdirTemp("", "deploydock-build-*")
 	if err != nil {
 		p.failDeployment(job, logger, "failed to create temp dir: "+err.Error())
@@ -98,21 +100,12 @@ func (p *Pool) processJob(job BuildJob) {
 		return
 	}
 
-	// 3. Update app runtime
-	_, err = p.db.Exec(
-		"UPDATE apps SET runtime = $1, updated_at = NOW() WHERE id = $2",
-		string(buildResult.Runtime), job.AppID,
-	)
-	if err != nil {
-		logger.Stderr("failed to update app runtime: " + err.Error())
-	}
+	p.db.Exec("UPDATE apps SET runtime = $1, updated_at = NOW() WHERE id = $2",
+		string(buildResult.Runtime), job.AppID)
 
-	// 4. Deploy container
+	// 3. Deploy container (zero-downtime rolling)
 	logger.Stdout("starting deploy engine...")
-	_, err = p.db.Exec("UPDATE deployments SET status = 'deploying' WHERE id = $1", job.DeploymentID)
-	if err != nil {
-		logger.Stderr("failed to update deployment status: " + err.Error())
-	}
+	p.db.Exec("UPDATE deployments SET status = 'deploying' WHERE id = $1", job.DeploymentID)
 
 	deployEngine := deploy.NewEngine(p.db)
 	deployResult, err := deployEngine.Deploy(
@@ -126,24 +119,19 @@ func (p *Pool) processJob(job BuildJob) {
 		return
 	}
 
-	// 5. Mark deployment live
-	_, err = p.db.Exec(
-		"UPDATE deployments SET status = 'live', finished_at = NOW() WHERE id = $1",
-		job.DeploymentID,
-	)
-	if err != nil {
-		logger.Stderr("failed to mark deployment live: " + err.Error())
-	}
+	// 4. Mark live
+	p.db.Exec("UPDATE deployments SET status = 'live', finished_at = NOW() WHERE id = $1", job.DeploymentID)
+	p.db.Exec("UPDATE apps SET status = 'live', updated_at = NOW() WHERE id = $1", job.AppID)
 
-	// 6. Mark app live
-	_, err = p.db.Exec("UPDATE apps SET status = 'live', updated_at = NOW() WHERE id = $1", job.AppID)
-	if err != nil {
-		logger.Stderr("failed to mark app live: " + err.Error())
+	// 5. Sync Nginx routing
+	logger.Stdout("syncing nginx routing...")
+	if err := p.nginx.Sync(context.Background()); err != nil {
+		logger.Stderr("nginx sync failed (non-fatal): " + err.Error())
 	}
 
 	logger.Stdout(
 		"deployment live — container " + deployResult.ContainerID +
-			" running on port " + fmt.Sprint(deployResult.Port),
+			" on port " + fmt.Sprint(deployResult.Port),
 	)
 }
 
