@@ -40,8 +40,7 @@ func (m *Manager) Sync(ctx context.Context) error {
 	config := GenerateNginxConfig(routes)
 
 	if err := os.WriteFile(m.configPath, []byte(config), 0644); err != nil {
-		// In dev nginx may not be installed — log and continue
-		log.Printf("nginx: could not write config: %v", err)
+		log.Printf("nginx: could not write config: %v (dev mode, skipping)", err)
 		return nil
 	}
 
@@ -55,10 +54,19 @@ func (m *Manager) Sync(ctx context.Context) error {
 
 func (m *Manager) loadRoutes(ctx context.Context) ([]AppRoute, error) {
 	rows, err := m.db.QueryContext(ctx, `
-		SELECT a.slug, d.port, COALESCE(
-			(SELECT string_agg(hostname, ',') FROM domains WHERE app_id = a.id AND ssl_status = 'active'),
-			''
-		) as custom_domains
+		SELECT
+			a.slug,
+			d.port,
+			COALESCE(
+				(SELECT string_agg(hostname, ',' ORDER BY hostname)
+				 FROM domains WHERE app_id = a.id),
+				''
+			) as all_domains,
+			COALESCE(
+				(SELECT string_agg(hostname, ',' ORDER BY hostname)
+				 FROM domains WHERE app_id = a.id AND ssl_status = 'active'),
+				''
+			) as ssl_domains
 		FROM apps a
 		JOIN deployments d ON d.app_id = a.id AND d.status = 'live'
 		WHERE a.status = 'live' AND d.port IS NOT NULL
@@ -72,18 +80,13 @@ func (m *Manager) loadRoutes(ctx context.Context) ([]AppRoute, error) {
 	var routes []AppRoute
 	for rows.Next() {
 		var r AppRoute
-		var customDomainsStr string
-		if err := rows.Scan(&r.Slug, &r.ContainerPort, &customDomainsStr); err != nil {
+		var allDomains, sslDomains string
+		if err := rows.Scan(&r.Slug, &r.ContainerPort, &allDomains, &sslDomains); err != nil {
 			return nil, err
 		}
 		r.Domain = m.domain
-		if customDomainsStr != "" {
-			for _, d := range strings.Split(customDomainsStr, ",") {
-				if d != "" {
-					r.CustomDomains = append(r.CustomDomains, d)
-				}
-			}
-		}
+		r.CustomDomains = splitNonEmpty(allDomains)
+		r.SSLDomains = splitNonEmpty(sslDomains)
 		routes = append(routes, r)
 	}
 
@@ -94,9 +97,18 @@ func (m *Manager) reload() error {
 	cmd := exec.Command("nginx", "-s", "reload")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("nginx reload: %v — %s", err, string(output))
-		log.Println("nginx: skipping reload in dev (nginx not running)")
+		log.Printf("nginx reload: %v — %s (dev mode, skipping)", err, string(output))
 		return nil
 	}
 	return nil
+}
+
+func splitNonEmpty(s string) []string {
+	var result []string
+	for _, part := range strings.Split(s, ",") {
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }

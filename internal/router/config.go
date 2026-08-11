@@ -10,8 +10,10 @@ type AppRoute struct {
 	Domain        string
 	ContainerPort int
 	CustomDomains []string
+	SSLDomains    []string // custom domains with active certs
 }
 
+// GenerateNginxConfig builds a complete Nginx config for all active apps.
 func GenerateNginxConfig(routes []AppRoute) string {
 	var b strings.Builder
 
@@ -19,12 +21,19 @@ func GenerateNginxConfig(routes []AppRoute) string {
 	b.WriteString("# Do not edit manually — regenerated on every deploy\n\n")
 
 	for _, r := range routes {
+		// Default subdomain — HTTP only (deploydock.local doesn't get Let's Encrypt)
 		b.WriteString(serverBlock(
 			fmt.Sprintf("%s.%s", r.Slug, r.Domain),
 			r.ContainerPort,
 		))
+
+		// Custom domains — SSL if cert exists, HTTP otherwise
 		for _, domain := range r.CustomDomains {
-			b.WriteString(serverBlock(domain, r.ContainerPort))
+			if containsString(r.SSLDomains, domain) {
+				b.WriteString(GenerateSSLServerBlock(domain, r.ContainerPort))
+			} else {
+				b.WriteString(serverBlock(domain, r.ContainerPort))
+			}
 		}
 	}
 
@@ -36,6 +45,10 @@ func serverBlock(hostname string, port int) string {
 server {
     listen 80;
     server_name %s;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
 
     location / {
         proxy_pass http://host.docker.internal:%d;
@@ -53,4 +66,13 @@ server {
     }
 }
 `, hostname, port)
+}
+
+func containsString(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
