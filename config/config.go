@@ -8,16 +8,16 @@ import (
 )
 
 type Config struct {
-	AppEnv      string
-	DatabaseURL string
-	RedisURL    string
-	JWTSecret   string
+	AppEnv       string
+	DatabaseURL  string
+	RedisURL     string
+	JWTSecret    string
 	DockerSocket string
-	Port        string
+	EnvSecret    string
+	Port         string
 }
 
 func Load() *Config {
-	// Load .env in development — ignored if file doesn't exist
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, reading from environment")
 	}
@@ -28,6 +28,7 @@ func Load() *Config {
 		RedisURL:     getEnv("REDIS_URL", "redis://localhost:6379"),
 		JWTSecret:    getEnv("JWT_SECRET", "change_me_in_production"),
 		DockerSocket: getEnv("DOCKER_SOCKET", "/var/run/docker.sock"),
+		EnvSecret:    getEnv("ENV_SECRET", "deploydock_default_secret_32byte"),
 		Port:         getEnv("PORT", "8080"),
 	}
 }

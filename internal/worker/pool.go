@@ -15,6 +15,7 @@ import (
 	"github.com/constantine950/deploydock/internal/build"
 	"github.com/constantine950/deploydock/internal/deploy"
 	"github.com/constantine950/deploydock/internal/router"
+	"github.com/constantine950/deploydock/pkg/crypto"
 )
 
 type BuildJob struct {
@@ -103,27 +104,38 @@ func (p *Pool) processJob(job BuildJob) {
 	p.db.Exec("UPDATE apps SET runtime = $1, updated_at = NOW() WHERE id = $2",
 		string(buildResult.Runtime), job.AppID)
 
-	// 3. Deploy container (zero-downtime rolling)
+	// 3. Load env vars (decrypted) for this app
+	envVars, err := p.loadEnvVars(job.AppID)
+	if err != nil {
+		logger.Stderr("failed to load env vars: " + err.Error())
+		envVars = nil // continue without env vars
+	}
+	if len(envVars) > 0 {
+		logger.Stdout(fmt.Sprintf("injecting %d env vars", len(envVars)))
+	}
+
+	// 4. Deploy container with env vars
 	logger.Stdout("starting deploy engine...")
 	p.db.Exec("UPDATE deployments SET status = 'deploying' WHERE id = $1", job.DeploymentID)
 
 	deployEngine := deploy.NewEngine(p.db)
-	deployResult, err := deployEngine.Deploy(
+	deployResult, err := deployEngine.DeployWithEnv(
 		context.Background(),
 		buildResult.ImageTag,
 		job.AppID,
 		job.DeploymentID,
+		envVars,
 	)
 	if err != nil {
 		p.failDeployment(job, logger, "deploy failed: "+err.Error())
 		return
 	}
 
-	// 4. Mark live
+	// 5. Mark live
 	p.db.Exec("UPDATE deployments SET status = 'live', finished_at = NOW() WHERE id = $1", job.DeploymentID)
 	p.db.Exec("UPDATE apps SET status = 'live', updated_at = NOW() WHERE id = $1", job.AppID)
 
-	// 5. Sync Nginx routing
+	// 6. Sync Nginx
 	logger.Stdout("syncing nginx routing...")
 	if err := p.nginx.Sync(context.Background()); err != nil {
 		logger.Stderr("nginx sync failed (non-fatal): " + err.Error())
@@ -133,6 +145,32 @@ func (p *Pool) processJob(job BuildJob) {
 		"deployment live — container " + deployResult.ContainerID +
 			" on port " + fmt.Sprint(deployResult.Port),
 	)
+}
+
+// loadEnvVars fetches and decrypts all env vars for an app.
+func (p *Pool) loadEnvVars(appID string) (map[string]string, error) {
+	rows, err := p.db.Query(
+		"SELECT key, value FROM env_vars WHERE app_id = $1", appID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	envVars := make(map[string]string)
+	for rows.Next() {
+		var k, encryptedVal string
+		if err := rows.Scan(&k, &encryptedVal); err != nil {
+			return nil, err
+		}
+		val, err := crypto.Decrypt(encryptedVal)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt %s: %w", k, err)
+		}
+		envVars[k] = val
+	}
+
+	return envVars, rows.Err()
 }
 
 func (p *Pool) failDeployment(job BuildJob, logger *build.Logger, errMsg string) {

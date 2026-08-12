@@ -52,6 +52,7 @@ func main() {
 		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
 	}))
 
+	// Health check
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok", "env": cfg.AppEnv})
 	})
@@ -60,7 +61,13 @@ func main() {
 	webhookHandler := webhook.NewHandler(db, rdb)
 	app.Post("/webhooks/git", webhookHandler.HandlePush)
 
-	// Build worker — Days 5 & 6
+	// Env vars — Day 12
+	envHandler := webhook.NewEnvHandler(db)
+	app.Get("/apps/:id/env", envHandler.List)
+	app.Post("/apps/:id/env", envHandler.Set)
+	app.Delete("/apps/:id/env/:key", envHandler.Delete)
+
+	// Build worker — Days 5-12
 	pool := worker.NewPool(db, rdb)
 	go pool.Start(context.Background())
 
