@@ -71,7 +71,8 @@ func (p *Pool) Start(ctx context.Context) {
 }
 
 func (p *Pool) processJob(job BuildJob) {
-	logger := build.NewLogger(p.db, job.DeploymentID)
+	// Use Redis-backed logger for live streaming
+	logger := build.NewLoggerWithRedis(p.db, p.rdb, job.DeploymentID)
 	logger.Stdout("starting build for deployment " + job.DeploymentID)
 
 	p.db.Exec("UPDATE deployments SET status = 'building' WHERE id = $1", job.DeploymentID)
@@ -104,17 +105,17 @@ func (p *Pool) processJob(job BuildJob) {
 	p.db.Exec("UPDATE apps SET runtime = $1, updated_at = NOW() WHERE id = $2",
 		string(buildResult.Runtime), job.AppID)
 
-	// 3. Load env vars (decrypted) for this app
+	// 3. Load env vars
 	envVars, err := p.loadEnvVars(job.AppID)
 	if err != nil {
-		logger.Stderr("failed to load env vars: " + err.Error())
-		envVars = nil // continue without env vars
+		logger.Stderr("failed to load env vars (continuing): " + err.Error())
+		envVars = nil
 	}
 	if len(envVars) > 0 {
 		logger.Stdout(fmt.Sprintf("injecting %d env vars", len(envVars)))
 	}
 
-	// 4. Deploy container with env vars
+	// 4. Deploy container
 	logger.Stdout("starting deploy engine...")
 	p.db.Exec("UPDATE deployments SET status = 'deploying' WHERE id = $1", job.DeploymentID)
 
@@ -141,17 +142,13 @@ func (p *Pool) processJob(job BuildJob) {
 		logger.Stderr("nginx sync failed (non-fatal): " + err.Error())
 	}
 
-	logger.Stdout(
-		"deployment live — container " + deployResult.ContainerID +
-			" on port " + fmt.Sprint(deployResult.Port),
-	)
+	logger.Stdout("[deployment finished]")
+	logger.Stdout("deployment live — container " + deployResult.ContainerID +
+		" on port " + fmt.Sprint(deployResult.Port))
 }
 
-// loadEnvVars fetches and decrypts all env vars for an app.
 func (p *Pool) loadEnvVars(appID string) (map[string]string, error) {
-	rows, err := p.db.Query(
-		"SELECT key, value FROM env_vars WHERE app_id = $1", appID,
-	)
+	rows, err := p.db.Query("SELECT key, value FROM env_vars WHERE app_id = $1", appID)
 	if err != nil {
 		return nil, err
 	}
@@ -169,12 +166,12 @@ func (p *Pool) loadEnvVars(appID string) (map[string]string, error) {
 		}
 		envVars[k] = val
 	}
-
 	return envVars, rows.Err()
 }
 
 func (p *Pool) failDeployment(job BuildJob, logger *build.Logger, errMsg string) {
 	logger.Stderr(errMsg)
+	logger.Stderr("[deployment failed]")
 	p.db.Exec(
 		"UPDATE deployments SET status = 'failed', error_message = $1, finished_at = NOW() WHERE id = $2",
 		errMsg, job.DeploymentID,

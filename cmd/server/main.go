@@ -10,6 +10,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/gofiber/websocket/v2"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 
@@ -67,7 +68,11 @@ func main() {
 	app.Post("/apps/:id/env", envHandler.Set)
 	app.Delete("/apps/:id/env/:key", envHandler.Delete)
 
-	// Build worker — Days 5-12
+	// Log streaming WebSocket — Day 13
+	logHandler := webhook.NewLogHandler(db, rdb)
+	app.Get("/deployments/:id/logs", webhook.WSUpgrade, websocket.New(logHandler.Stream))
+
+	// Build worker — Days 5-13
 	pool := worker.NewPool(db, rdb)
 	go pool.Start(context.Background())
 
