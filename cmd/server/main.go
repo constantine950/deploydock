@@ -58,21 +58,26 @@ func main() {
 		return c.JSON(fiber.Map{"status": "ok", "env": cfg.AppEnv})
 	})
 
-	// Webhook — Day 4
+	// Webhook 
 	webhookHandler := webhook.NewHandler(db, rdb)
 	app.Post("/webhooks/git", webhookHandler.HandlePush)
 
-	// Env vars — Day 12
+	// Env vars 
 	envHandler := webhook.NewEnvHandler(db)
 	app.Get("/apps/:id/env", envHandler.List)
 	app.Post("/apps/:id/env", envHandler.Set)
 	app.Delete("/apps/:id/env/:key", envHandler.Delete)
 
-	// Log streaming WebSocket — Day 13
+	// Deployments 
+	deployHandler := webhook.NewDeployHandler(db)
+	app.Get("/apps/:id/deployments", deployHandler.List)
+	app.Get("/deployments/:id", deployHandler.Get)
+	app.Post("/deployments/:id/rollback", deployHandler.Rollback)
+
+	// Log streaming WebSocket 
 	logHandler := webhook.NewLogHandler(db, rdb)
 	app.Get("/deployments/:id/logs", webhook.WSUpgrade, websocket.New(logHandler.Stream))
 
-	// Build worker — Days 5-13
 	pool := worker.NewPool(db, rdb)
 	go pool.Start(context.Background())
 
