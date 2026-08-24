@@ -1,7 +1,9 @@
 package webhook
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -138,6 +140,56 @@ func (h *AppsHandler) Delete(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"message": "app deleted"})
+}
+
+// POST /apps/:id/deploy — trigger a manual deployment
+func (h *AppsHandler) Deploy(c *fiber.Ctx) error {
+	appID := c.Params("id")
+
+	var repoURL, branch string
+	err := h.db.QueryRow(
+		"SELECT repo_url, branch FROM apps WHERE id = $1", appID,
+	).Scan(&repoURL, &branch)
+	if err == sql.ErrNoRows {
+		return c.Status(404).JSON(fiber.Map{"error": "app not found"})
+	}
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "db error"})
+	}
+
+	deploymentID := uuid.New().String()
+	_, err = h.db.Exec(`
+		INSERT INTO deployments (id, app_id, commit_sha, commit_message, status)
+		VALUES ($1, $2, 'manual', 'Manual deploy', 'queued')
+	`, deploymentID, appID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "failed to create deployment"})
+	}
+
+	h.db.Exec("UPDATE apps SET status = 'building', updated_at = NOW() WHERE id = $1", appID)
+
+	type BuildJob struct {
+		DeploymentID string `json:"deployment_id"`
+		AppID        string `json:"app_id"`
+		RepoURL      string `json:"repo_url"`
+		Branch       string `json:"branch"`
+		CommitSHA    string `json:"commit_sha"`
+	}
+
+	job := BuildJob{
+		DeploymentID: deploymentID,
+		AppID:        appID,
+		RepoURL:      repoURL,
+		Branch:       branch,
+		CommitSHA:    "manual",
+	}
+	jobJSON, _ := json.Marshal(job)
+	h.rdb.LPush(context.Background(), "build:queue", jobJSON)
+
+	return c.Status(202).JSON(fiber.Map{
+		"deployment_id": deploymentID,
+		"status":        "queued",
+	})
 }
 
 func slugify(s string) string {

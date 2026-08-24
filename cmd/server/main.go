@@ -69,6 +69,7 @@ func main() {
 	app.Post("/apps", appsHandler.Create)
 	app.Get("/apps/:id", appsHandler.Get)
 	app.Delete("/apps/:id", appsHandler.Delete)
+	app.Post("/apps/:id/deploy", appsHandler.Deploy)
 
 	// Webhook — Day 4
 	webhookHandler := webhook.NewHandler(db, rdb)
