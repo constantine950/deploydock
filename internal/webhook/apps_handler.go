@@ -1,0 +1,153 @@
+package webhook
+
+import (
+	"database/sql"
+	"strings"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
+)
+
+type AppsHandler struct {
+	db  *sql.DB
+	rdb *redis.Client
+}
+
+func NewAppsHandler(db *sql.DB, rdb *redis.Client) *AppsHandler {
+	return &AppsHandler{db: db, rdb: rdb}
+}
+
+// GET /apps
+func (h *AppsHandler) List(c *fiber.Ctx) error {
+	rows, err := h.db.Query(`
+		SELECT id, name, slug, repo_url, branch, runtime, status, created_at
+		FROM apps ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "db error"})
+	}
+	defer rows.Close()
+
+	type App struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		Slug      string `json:"slug"`
+		RepoURL   string `json:"repo_url"`
+		Branch    string `json:"branch"`
+		Runtime   string `json:"runtime"`
+		Status    string `json:"status"`
+		CreatedAt string `json:"created_at"`
+	}
+
+	var apps []App
+	for rows.Next() {
+		var a App
+		var runtime sql.NullString
+		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.RepoURL, &a.Branch, &runtime, &a.Status, &a.CreatedAt); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "scan error"})
+		}
+		a.Runtime = runtime.String
+		apps = append(apps, a)
+	}
+
+	return c.JSON(fiber.Map{"apps": apps})
+}
+
+// POST /apps
+func (h *AppsHandler) Create(c *fiber.Ctx) error {
+	var body struct {
+		Name    string `json:"name"`
+		RepoURL string `json:"repo_url"`
+		Branch  string `json:"branch"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
+	}
+	if body.Name == "" || body.RepoURL == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "name and repo_url are required"})
+	}
+	if body.Branch == "" {
+		body.Branch = "main"
+	}
+
+	slug := slugify(body.Name)
+	id := uuid.New().String()
+
+	_, err := h.db.Exec(`
+		INSERT INTO apps (id, user_id, name, slug, repo_url, branch, status)
+		VALUES ($1, $2, $3, $4, $5, $6, 'idle')
+	`, id, "a0000000-0000-0000-0000-000000000001", body.Name, slug, body.RepoURL, body.Branch)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "failed to create app: " + err.Error()})
+	}
+
+	return c.Status(201).JSON(fiber.Map{
+		"id":       id,
+		"name":     body.Name,
+		"slug":     slug,
+		"repo_url": body.RepoURL,
+		"branch":   body.Branch,
+		"status":   "idle",
+	})
+}
+
+// GET /apps/:id
+func (h *AppsHandler) Get(c *fiber.Ctx) error {
+	appID := c.Params("id")
+
+	var id, name, slug, repoURL, branch, status, createdAt string
+	var runtime sql.NullString
+
+	err := h.db.QueryRow(`
+		SELECT id, name, slug, repo_url, branch, runtime, status, created_at
+		FROM apps WHERE id = $1
+	`, appID).Scan(&id, &name, &slug, &repoURL, &branch, &runtime, &status, &createdAt)
+
+	if err == sql.ErrNoRows {
+		return c.Status(404).JSON(fiber.Map{"error": "app not found"})
+	}
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "db error"})
+	}
+
+	return c.JSON(fiber.Map{
+		"id":         id,
+		"name":       name,
+		"slug":       slug,
+		"repo_url":   repoURL,
+		"branch":     branch,
+		"runtime":    runtime.String,
+		"status":     status,
+		"created_at": createdAt,
+	})
+}
+
+// DELETE /apps/:id
+func (h *AppsHandler) Delete(c *fiber.Ctx) error {
+	appID := c.Params("id")
+
+	result, err := h.db.Exec("DELETE FROM apps WHERE id = $1", appID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "db error"})
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return c.Status(404).JSON(fiber.Map{"error": "app not found"})
+	}
+
+	return c.JSON(fiber.Map{"message": "app deleted"})
+}
+
+func slugify(s string) string {
+	s = strings.ToLower(s)
+	s = strings.ReplaceAll(s, " ", "-")
+	var result strings.Builder
+	for _, c := range s {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
+			result.WriteRune(c)
+		}
+	}
+	return strings.Trim(result.String(), "-")
+}

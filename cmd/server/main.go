@@ -58,26 +58,39 @@ func main() {
 		return c.JSON(fiber.Map{"status": "ok", "env": cfg.AppEnv})
 	})
 
-	// Webhook 
+	// Auth — Day 15
+	authHandler := webhook.NewAuthHandler(db)
+	app.Post("/auth/register", authHandler.Register)
+	app.Post("/auth/login", authHandler.Login)
+
+	// Apps — Day 15
+	appsHandler := webhook.NewAppsHandler(db, rdb)
+	app.Get("/apps", appsHandler.List)
+	app.Post("/apps", appsHandler.Create)
+	app.Get("/apps/:id", appsHandler.Get)
+	app.Delete("/apps/:id", appsHandler.Delete)
+
+	// Webhook — Day 4
 	webhookHandler := webhook.NewHandler(db, rdb)
 	app.Post("/webhooks/git", webhookHandler.HandlePush)
 
-	// Env vars 
+	// Env vars — Day 12
 	envHandler := webhook.NewEnvHandler(db)
 	app.Get("/apps/:id/env", envHandler.List)
 	app.Post("/apps/:id/env", envHandler.Set)
 	app.Delete("/apps/:id/env/:key", envHandler.Delete)
 
-	// Deployments 
+	// Deployments — Day 14
 	deployHandler := webhook.NewDeployHandler(db)
 	app.Get("/apps/:id/deployments", deployHandler.List)
 	app.Get("/deployments/:id", deployHandler.Get)
 	app.Post("/deployments/:id/rollback", deployHandler.Rollback)
 
-	// Log streaming WebSocket 
+	// Log streaming WebSocket — Day 13
 	logHandler := webhook.NewLogHandler(db, rdb)
 	app.Get("/deployments/:id/logs", webhook.WSUpgrade, websocket.New(logHandler.Stream))
 
+	// Build worker
 	pool := worker.NewPool(db, rdb)
 	go pool.Start(context.Background())
 

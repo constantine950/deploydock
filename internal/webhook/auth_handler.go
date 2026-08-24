@@ -2,9 +2,8 @@ package webhook
 
 import (
 	"database/sql"
-	"time"
-
 	"os"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"

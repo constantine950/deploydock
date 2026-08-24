@@ -65,8 +65,8 @@ services:
     depends_on:
       - server
     environment:
-      NEXT_PUBLIC_API_URL: http://server:8080
-      NEXT_PUBLIC_WS_URL: ws://server:8080
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+      NEXT_PUBLIC_WS_URL: ws://localhost:8080
     ports:
       - "3000:3000"
     volumes:
