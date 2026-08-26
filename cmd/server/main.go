@@ -22,7 +22,6 @@ import (
 func main() {
 	cfg := config.Load()
 
-	// Postgres
 	db, err := sql.Open("postgres", cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("failed to connect to postgres: %v", err)
@@ -33,7 +32,6 @@ func main() {
 	}
 	log.Println("postgres connected")
 
-	// Redis
 	redisOpts, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
 		log.Fatalf("failed to parse redis URL: %v", err)
@@ -44,26 +42,25 @@ func main() {
 	}
 	log.Println("redis connected")
 
-	// Fiber
 	app := fiber.New(fiber.Config{AppName: "DeployDock v1"})
 	app.Use(recover.New())
 	app.Use(logger.New())
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
 		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
+		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
 	}))
 
-	// Health check
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok", "env": cfg.AppEnv})
 	})
 
-	// Auth — Day 15
+	// Auth
 	authHandler := webhook.NewAuthHandler(db)
 	app.Post("/auth/register", authHandler.Register)
 	app.Post("/auth/login", authHandler.Login)
 
-	// Apps — Day 15
+	// Apps
 	appsHandler := webhook.NewAppsHandler(db, rdb)
 	app.Get("/apps", appsHandler.List)
 	app.Post("/apps", appsHandler.Create)
@@ -71,23 +68,29 @@ func main() {
 	app.Delete("/apps/:id", appsHandler.Delete)
 	app.Post("/apps/:id/deploy", appsHandler.Deploy)
 
-	// Webhook — Day 4
+	// Webhook
 	webhookHandler := webhook.NewHandler(db, rdb)
 	app.Post("/webhooks/git", webhookHandler.HandlePush)
 
-	// Env vars — Day 12
+	// Env vars
 	envHandler := webhook.NewEnvHandler(db)
 	app.Get("/apps/:id/env", envHandler.List)
 	app.Post("/apps/:id/env", envHandler.Set)
 	app.Delete("/apps/:id/env/:key", envHandler.Delete)
 
-	// Deployments — Day 14
+	// Domains
+	domainsHandler := webhook.NewDomainsHandler(db)
+	app.Get("/apps/:id/domains", domainsHandler.List)
+	app.Post("/apps/:id/domains", domainsHandler.Add)
+	app.Delete("/apps/:id/domains/:domainId", domainsHandler.Remove)
+
+	// Deployments
 	deployHandler := webhook.NewDeployHandler(db)
 	app.Get("/apps/:id/deployments", deployHandler.List)
 	app.Get("/deployments/:id", deployHandler.Get)
 	app.Post("/deployments/:id/rollback", deployHandler.Rollback)
 
-	// Log streaming WebSocket — Day 13
+	// Log streaming WebSocket
 	logHandler := webhook.NewLogHandler(db, rdb)
 	app.Get("/deployments/:id/logs", webhook.WSUpgrade, websocket.New(logHandler.Stream))
 

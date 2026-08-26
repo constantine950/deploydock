@@ -10,6 +10,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const tabs = [
     { label: "Deployments", href: `/dashboard/apps/${id}` },
     { label: "Environment", href: `/dashboard/apps/${id}/env` },
+    { label: "Domains", href: `/dashboard/apps/${id}/domains` },
   ];
 
   return (
