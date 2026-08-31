@@ -51,48 +51,49 @@ func main() {
 		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
 	}))
 
+	// Public routes
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok", "env": cfg.AppEnv})
 	})
+	app.Post("/webhooks/git", webhook.NewHandler(db, rdb).HandlePush)
 
 	// Auth
 	authHandler := webhook.NewAuthHandler(db)
 	app.Post("/auth/register", authHandler.Register)
 	app.Post("/auth/login", authHandler.Login)
 
+	// Log streaming WebSocket — must be before protected routes
+	logHandler := webhook.NewLogHandler(db, rdb)
+	app.Get("/deployments/:id/logs", webhook.WSUpgrade, websocket.New(logHandler.Stream))
+
+	// Protected routes
+	api := app.Group("/", webhook.AuthMiddleware)
+
 	// Apps
 	appsHandler := webhook.NewAppsHandler(db, rdb)
-	app.Get("/apps", appsHandler.List)
-	app.Post("/apps", appsHandler.Create)
-	app.Get("/apps/:id", appsHandler.Get)
-	app.Delete("/apps/:id", appsHandler.Delete)
-	app.Post("/apps/:id/deploy", appsHandler.Deploy)
-
-	// Webhook
-	webhookHandler := webhook.NewHandler(db, rdb)
-	app.Post("/webhooks/git", webhookHandler.HandlePush)
+	api.Get("/apps", appsHandler.List)
+	api.Post("/apps", appsHandler.Create)
+	api.Get("/apps/:id", appsHandler.Get)
+	api.Delete("/apps/:id", appsHandler.Delete)
+	api.Post("/apps/:id/deploy", appsHandler.Deploy)
 
 	// Env vars
 	envHandler := webhook.NewEnvHandler(db)
-	app.Get("/apps/:id/env", envHandler.List)
-	app.Post("/apps/:id/env", envHandler.Set)
-	app.Delete("/apps/:id/env/:key", envHandler.Delete)
+	api.Get("/apps/:id/env", envHandler.List)
+	api.Post("/apps/:id/env", envHandler.Set)
+	api.Delete("/apps/:id/env/:key", envHandler.Delete)
 
 	// Domains
 	domainsHandler := webhook.NewDomainsHandler(db)
-	app.Get("/apps/:id/domains", domainsHandler.List)
-	app.Post("/apps/:id/domains", domainsHandler.Add)
-	app.Delete("/apps/:id/domains/:domainId", domainsHandler.Remove)
+	api.Get("/apps/:id/domains", domainsHandler.List)
+	api.Post("/apps/:id/domains", domainsHandler.Add)
+	api.Delete("/apps/:id/domains/:domainId", domainsHandler.Remove)
 
 	// Deployments
 	deployHandler := webhook.NewDeployHandler(db)
-	app.Get("/apps/:id/deployments", deployHandler.List)
-	app.Get("/deployments/:id", deployHandler.Get)
-	app.Post("/deployments/:id/rollback", deployHandler.Rollback)
-
-	// Log streaming WebSocket
-	logHandler := webhook.NewLogHandler(db, rdb)
-	app.Get("/deployments/:id/logs", webhook.WSUpgrade, websocket.New(logHandler.Stream))
+	api.Get("/apps/:id/deployments", deployHandler.List)
+	api.Get("/deployments/:id", deployHandler.Get)
+	api.Post("/deployments/:id/rollback", deployHandler.Rollback)
 
 	// Build worker
 	pool := worker.NewPool(db, rdb)

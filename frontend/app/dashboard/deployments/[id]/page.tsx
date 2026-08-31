@@ -36,36 +36,58 @@ export default function DeploymentLogsPage() {
       .then((r) => setDeployment(r.data))
       .catch(console.error);
 
-    const wsUrl = `${process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8080"}/deployments/${id}/logs`;
-    const token = localStorage.getItem("token");
-    const ws = new WebSocket(`${wsUrl}?token=${token}`);
-    wsRef.current = ws;
+    let ws: WebSocket | null = null;
+    let cancelled = false;
 
-    ws.onopen = () => setConnected(true);
+    const connect = () => {
+      const wsUrl = `${process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8080"}/deployments/${id}/logs`;
+      const token = localStorage.getItem("token");
+      ws = new WebSocket(`${wsUrl}?token=${token}`);
+      wsRef.current = ws;
 
-    ws.onmessage = (event) => {
-      const raw = event.data as string;
-      const pipeIdx = raw.indexOf("|");
-      if (pipeIdx === -1) {
-        setLogs((prev) => [...prev, { stream: "stdout", text: raw }]);
-        return;
-      }
-      const stream = raw.slice(0, pipeIdx);
-      const text = raw.slice(pipeIdx + 1);
-      setLogs((prev) => [...prev, { stream, text }]);
+      ws.onopen = () => {
+        if (!cancelled) setConnected(true);
+      };
 
-      if (text === "[deployment finished]" || text === "[deployment failed]") {
-        api
-          .get(`/deployments/${id}`)
-          .then((r) => setDeployment(r.data))
-          .catch(console.error);
-      }
+      ws.onmessage = (event) => {
+        if (cancelled) return;
+        const raw = event.data as string;
+        const pipeIdx = raw.indexOf("|");
+        if (pipeIdx === -1) {
+          setLogs((prev) => [...prev, { stream: "stdout", text: raw }]);
+          return;
+        }
+        const stream = raw.slice(0, pipeIdx);
+        const text = raw.slice(pipeIdx + 1);
+        setLogs((prev) => [...prev, { stream, text }]);
+
+        if (
+          text === "[deployment finished]" ||
+          text === "[deployment failed]"
+        ) {
+          api
+            .get(`/deployments/${id}`)
+            .then((r) => setDeployment(r.data))
+            .catch(console.error);
+        }
+      };
+
+      ws.onclose = () => {
+        if (!cancelled) setConnected(false);
+      };
+      ws.onerror = () => {
+        if (!cancelled) setConnected(false);
+      };
     };
 
-    ws.onclose = () => setConnected(false);
-    ws.onerror = () => setConnected(false);
+    // Small delay to let React strict mode finish its double-invoke
+    const timer = setTimeout(connect, 100);
 
-    return () => ws.close();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      if (ws) ws.close();
+    };
   }, [id]);
 
   useEffect(() => {

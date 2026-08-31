@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useParams } from "next/navigation";
 import api from "@/lib/api";
 import { statusColor, timeAgo, shortSha } from "@/lib/utils";
+import { usePolling } from "@/hooks/usePolling";
+import { Trash2 } from "lucide-react";
 
 interface App {
   id: string;
@@ -27,12 +29,17 @@ interface Deployment {
   finished_at: string;
 }
 
+const ACTIVE_STATUSES = ["building", "deploying", "queued"];
+
 export default function AppDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [app, setApp] = useState<App | null>(null);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [loading, setLoading] = useState(true);
   const [deploying, setDeploying] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const isActive = app ? ACTIVE_STATUSES.includes(app.status) : false;
 
   async function load() {
     try {
@@ -49,20 +56,30 @@ export default function AppDetailPage() {
     }
   }
 
-  useEffect(() => {
-    load();
-  }, [id]);
+  usePolling(load, isActive ? 3000 : 30000);
 
   async function triggerDeploy() {
     if (!app) return;
     setDeploying(true);
     try {
-      await api.post(`/apps/${id}/deploy`);
-      setTimeout(load, 2000);
+      const { data } = await api.post(`/apps/${id}/deploy`);
+      window.location.href = `/dashboard/deployments/${data.deployment_id}`;
     } catch (err: any) {
       alert(err.response?.data?.error || "Deploy failed");
-    } finally {
       setDeploying(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!app) return;
+    if (!confirm(`Delete "${app.name}"? This cannot be undone.`)) return;
+    setDeleting(true);
+    try {
+      await api.delete(`/apps/${id}`);
+      window.location.href = "/dashboard";
+    } catch (err: any) {
+      alert(err.response?.data?.error || "Delete failed");
+      setDeleting(false);
     }
   }
 
@@ -92,6 +109,11 @@ export default function AppDetailPage() {
             >
               {app.status}
             </span>
+            {isActive && (
+              <span className="text-xs text-blue-400 animate-pulse">
+                deploying...
+              </span>
+            )}
             {app.runtime && (
               <span className="text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-400">
                 {app.runtime}
@@ -102,15 +124,27 @@ export default function AppDetailPage() {
             {app.repo_url} · {app.branch}
           </p>
         </div>
-        <button
-          onClick={triggerDeploy}
-          disabled={
-            deploying || app.status === "building" || app.status === "deploying"
-          }
-          className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
-        >
-          {deploying ? "Queuing..." : "Deploy now"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={triggerDeploy}
+            disabled={deploying || isActive}
+            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+          >
+            {deploying
+              ? "Queuing..."
+              : isActive
+                ? "Deploying..."
+                : "Deploy now"}
+          </button>
+          <button
+            onClick={handleDelete}
+            disabled={deleting}
+            className="flex items-center gap-1.5 border border-red-800 hover:border-red-600 text-red-500 hover:text-red-400 disabled:opacity-50 text-sm font-medium px-3 py-2 rounded-lg transition-colors"
+          >
+            <Trash2 size={14} />
+            {deleting ? "Deleting..." : "Delete"}
+          </button>
+        </div>
       </div>
 
       <div>
@@ -161,6 +195,16 @@ export default function AppDetailPage() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
+                  {d.status === "live" && d.port && (
+                    <a
+                      href={`http://localhost:${d.port}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-green-400 hover:text-green-300 transition-colors px-3 py-1.5 border border-green-800 hover:border-green-600 rounded-lg"
+                    >
+                      View ↗
+                    </a>
+                  )}
                   <a
                     href={`/dashboard/deployments/${d.id}`}
                     className="text-xs text-gray-500 hover:text-white transition-colors px-3 py-1.5 border border-gray-800 hover:border-gray-700 rounded-lg"
@@ -180,6 +224,22 @@ export default function AppDetailPage() {
             ))}
           </div>
         )}
+      </div>
+
+      <div className="mt-12 border border-red-900/30 rounded-xl p-6">
+        <h2 className="text-sm font-medium text-red-400 mb-1">Danger zone</h2>
+        <p className="text-sm text-gray-500 mb-4">
+          Deleting this app removes all deployments, env vars, and domains.
+          Running containers will be stopped.
+        </p>
+        <button
+          onClick={handleDelete}
+          disabled={deleting}
+          className="flex items-center gap-2 bg-red-600/10 hover:bg-red-600/20 border border-red-800 text-red-400 text-sm font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
+        >
+          <Trash2 size={14} />
+          {deleting ? "Deleting..." : "Delete this app"}
+        </button>
       </div>
     </div>
   );

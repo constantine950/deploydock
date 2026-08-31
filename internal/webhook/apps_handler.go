@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"os/exec"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -20,12 +21,13 @@ func NewAppsHandler(db *sql.DB, rdb *redis.Client) *AppsHandler {
 	return &AppsHandler{db: db, rdb: rdb}
 }
 
-// GET /apps
 func (h *AppsHandler) List(c *fiber.Ctx) error {
+	userID := c.Locals("user_id").(string)
+
 	rows, err := h.db.Query(`
 		SELECT id, name, slug, repo_url, branch, runtime, status, created_at
-		FROM apps ORDER BY created_at DESC
-	`)
+		FROM apps WHERE user_id = $1 ORDER BY created_at DESC
+	`, userID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "db error"})
 	}
@@ -52,12 +54,16 @@ func (h *AppsHandler) List(c *fiber.Ctx) error {
 		a.Runtime = runtime.String
 		apps = append(apps, a)
 	}
+	if err := rows.Err(); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "rows error"})
+	}
 
 	return c.JSON(fiber.Map{"apps": apps})
 }
 
-// POST /apps
 func (h *AppsHandler) Create(c *fiber.Ctx) error {
+	userID := c.Locals("user_id").(string)
+
 	var body struct {
 		Name    string `json:"name"`
 		RepoURL string `json:"repo_url"`
@@ -79,7 +85,7 @@ func (h *AppsHandler) Create(c *fiber.Ctx) error {
 	_, err := h.db.Exec(`
 		INSERT INTO apps (id, user_id, name, slug, repo_url, branch, status)
 		VALUES ($1, $2, $3, $4, $5, $6, 'idle')
-	`, id, "a0000000-0000-0000-0000-000000000001", body.Name, slug, body.RepoURL, body.Branch)
+	`, id, userID, body.Name, slug, body.RepoURL, body.Branch)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "failed to create app: " + err.Error()})
 	}
@@ -94,8 +100,8 @@ func (h *AppsHandler) Create(c *fiber.Ctx) error {
 	})
 }
 
-// GET /apps/:id
 func (h *AppsHandler) Get(c *fiber.Ctx) error {
+	userID := c.Locals("user_id").(string)
 	appID := c.Params("id")
 
 	var id, name, slug, repoURL, branch, status, createdAt string
@@ -103,8 +109,8 @@ func (h *AppsHandler) Get(c *fiber.Ctx) error {
 
 	err := h.db.QueryRow(`
 		SELECT id, name, slug, repo_url, branch, runtime, status, created_at
-		FROM apps WHERE id = $1
-	`, appID).Scan(&id, &name, &slug, &repoURL, &branch, &runtime, &status, &createdAt)
+		FROM apps WHERE id = $1 AND user_id = $2
+	`, appID, userID).Scan(&id, &name, &slug, &repoURL, &branch, &runtime, &status, &createdAt)
 
 	if err == sql.ErrNoRows {
 		return c.Status(404).JSON(fiber.Map{"error": "app not found"})
@@ -125,30 +131,47 @@ func (h *AppsHandler) Get(c *fiber.Ctx) error {
 	})
 }
 
-// DELETE /apps/:id
 func (h *AppsHandler) Delete(c *fiber.Ctx) error {
+	userID := c.Locals("user_id").(string)
 	appID := c.Params("id")
 
-	result, err := h.db.Exec("DELETE FROM apps WHERE id = $1", appID)
+	// Stop any running containers for this app
+	rows, err := h.db.Query(`
+		SELECT id FROM deployments
+		WHERE app_id = $1 AND status = 'live' AND container_id IS NOT NULL
+	`, appID)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var deploymentID string
+			if err := rows.Scan(&deploymentID); err == nil {
+				name := "deploydock-" + deploymentID[:8]
+				exec.Command("docker", "stop", name).Run()
+				exec.Command("docker", "rm", name).Run()
+			}
+		}
+	}
+
+	result, err := h.db.Exec("DELETE FROM apps WHERE id = $1 AND user_id = $2", appID, userID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "db error"})
 	}
 
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
 		return c.Status(404).JSON(fiber.Map{"error": "app not found"})
 	}
 
 	return c.JSON(fiber.Map{"message": "app deleted"})
 }
 
-// POST /apps/:id/deploy — trigger a manual deployment
 func (h *AppsHandler) Deploy(c *fiber.Ctx) error {
+	userID := c.Locals("user_id").(string)
 	appID := c.Params("id")
 
 	var repoURL, branch string
 	err := h.db.QueryRow(
-		"SELECT repo_url, branch FROM apps WHERE id = $1", appID,
+		"SELECT repo_url, branch FROM apps WHERE id = $1 AND user_id = $2", appID, userID,
 	).Scan(&repoURL, &branch)
 	if err == sql.ErrNoRows {
 		return c.Status(404).JSON(fiber.Map{"error": "app not found"})
