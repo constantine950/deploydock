@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,7 +25,6 @@ func NewEngine(db *sql.DB) *Engine {
 	return &Engine{db: db}
 }
 
-// Build detects runtime, writes Dockerfile, builds image via docker CLI, streams logs.
 func (e *Engine) Build(ctx context.Context, repoPath, appID, deploymentID string, logger *Logger) (*BuildResult, error) {
 
 	// 1. Detect runtime
@@ -34,7 +34,13 @@ func (e *Engine) Build(ctx context.Context, repoPath, appID, deploymentID string
 	}
 	logger.Stdout("detected runtime: " + string(runtime))
 
-	// 2. Write Dockerfile
+	// 2. Validate the repo is runnable
+	if err := ValidateRunnable(repoPath, runtime); err != nil {
+		return nil, fmt.Errorf("validation failed: %w", err)
+	}
+	logger.Stdout("validation passed: repo has a runnable entry point")
+
+	// 3. Write Dockerfile
 	dockerfile, err := DockerfileTemplate(runtime)
 	if err != nil {
 		return nil, fmt.Errorf("no dockerfile template: %w", err)
@@ -46,15 +52,14 @@ func (e *Engine) Build(ctx context.Context, repoPath, appID, deploymentID string
 	defer os.Remove(dockerfilePath)
 	logger.Stdout("selected Dockerfile template for " + string(runtime))
 
-	// 3. Build image tag
+	// 4. Build image
 	imageTag := "deploydock/" + appID + ":" + deploymentID
 	logger.Stdout("building image " + imageTag)
 
-	// 4. Shell out to docker build — streams output in real time
 	cmd := exec.CommandContext(ctx, "docker", "build",
-    "-f", dockerfilePath,
-    "-t", imageTag,
-    repoPath,
+		"-f", dockerfilePath,
+		"-t", imageTag,
+		repoPath,
 	)
 	cmd.Env = append(cmd.Environ(), "DOCKER_BUILDKIT=0")
 
@@ -71,7 +76,6 @@ func (e *Engine) Build(ctx context.Context, repoPath, appID, deploymentID string
 		return nil, fmt.Errorf("failed to start docker build: %w", err)
 	}
 
-	// Stream stdout
 	go func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
@@ -82,13 +86,29 @@ func (e *Engine) Build(ctx context.Context, repoPath, appID, deploymentID string
 		}
 	}()
 
-	// Stream stderr (docker build writes progress to stderr)
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			line := strings.TrimRight(scanner.Text(), "\r\n")
+			var msg struct {
+				Stream string `json:"stream"`
+				Error  string `json:"error"`
+			}
+			if err := json.Unmarshal([]byte(line), &msg); err == nil {
+				if msg.Error != "" {
+					logger.Stderr(msg.Error)
+					return
+				}
+				if msg.Stream != "" {
+					out := strings.TrimRight(msg.Stream, "\n")
+					if out != "" {
+						logger.Stdout(out)
+					}
+					return
+				}
+			}
 			if line != "" {
-				logger.Stdout(line) // docker build progress is not really an error
+				logger.Stdout(line)
 			}
 		}
 	}()
@@ -97,12 +117,7 @@ func (e *Engine) Build(ctx context.Context, repoPath, appID, deploymentID string
 		return nil, fmt.Errorf("docker build failed: %w", err)
 	}
 
-	// 5. Record image tag on deployment
-	_, err = e.db.Exec("UPDATE deployments SET image_tag = $1 WHERE id = $2", imageTag, deploymentID)
-	if err != nil {
-		logger.Stderr("failed to record image tag: " + err.Error())
-	}
-
+	e.db.Exec("UPDATE deployments SET image_tag = $1 WHERE id = $2", imageTag, deploymentID)
 	logger.Stdout("image built successfully: " + imageTag)
 
 	return &BuildResult{
